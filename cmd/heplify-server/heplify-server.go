@@ -2,7 +2,9 @@ package main
 
 import (
 	"fmt"
+	"gopkg.in/DataDog/dd-trace-go.v1/profiler"
 	"html/template"
+	"io"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,6 +24,38 @@ import (
 type server interface {
 	Run()
 	End()
+}
+
+func StartECSProfiler() (func(), error) {
+	resp, err := http.Get("http://169.254.169.254/latest/meta-data/local-ipv4")
+	if err != nil {
+		return nil, fmt.Errorf("cannot query ec2 metadata: %w", err)
+
+	}
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("cannot get local IP address: %w", err)
+	}
+	host := string(bodyBytes)
+	os.Setenv("DD_AGENT_HOST", host)
+
+	resp.Body.Close()
+
+	if err := profiler.Start(
+		profiler.WithProfileTypes(
+			profiler.CPUProfile,
+			profiler.HeapProfile,
+			profiler.BlockProfile,
+			profiler.MutexProfile,
+			profiler.GoroutineProfile,
+		),
+		profiler.WithAgentAddr(fmt.Sprintf("%s:8126", host)),
+	); err != nil {
+		return nil, err
+	}
+	return func() {
+		profiler.Stop()
+	}, nil
 }
 
 func init() {
@@ -86,6 +120,13 @@ func main() {
 		fmt.Printf("VERSION: %s\r\n", config.Version)
 		os.Exit(0)
 	}
+
+	cancelProfile, err := StartECSProfiler()
+	if err != nil {
+		logp.Err("cannot start profiler: %v", err)
+		os.Exit(1)
+	}
+	defer cancelProfile()
 
 	startServer := func() {
 		hep := input.NewHEPInput()
